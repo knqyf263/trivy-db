@@ -3,12 +3,15 @@ package db
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
+	"github.com/samber/oops"
 	"golang.org/x/xerrors"
 
 	"github.com/aquasecurity/trivy-db/pkg/log"
@@ -61,6 +64,11 @@ func Init(dbDir string) (err error) {
 	}
 	dbPath := Path(dbDir)
 
+	// Set timeout to prevent indefinite waiting when database is locked by another process
+	options := &bolt.Options{
+		Timeout: 5 * time.Second,
+	}
+
 	// bbolt sometimes occurs the fatal error of "unexpected fault address".
 	// In that case, the local DB should be broken and needs to be removed.
 	debug.SetPanicOnFault(true)
@@ -69,13 +77,20 @@ func Init(dbDir string) (err error) {
 			if err = os.Remove(dbPath); err != nil {
 				return
 			}
-			db, err = bolt.Open(dbPath, 0600, nil)
+			db, err = bolt.Open(dbPath, 0600, options)
 		}
 		debug.SetPanicOnFault(false)
 	}()
-
-	db, err = bolt.Open(dbPath, 0600, nil)
+	
+	db, err = bolt.Open(dbPath, 0600, options)
 	if err != nil {
+		// Check if this is a timeout error and provide user-friendly message
+		if errors.Is(err, bolt.ErrTimeout) {
+			return oops.
+				In("db").
+				Tags("database", "lock").
+				Wrapf(err, "データベースが他のプロセスで使用中の可能性があります。しばらく待ってから再試行してください")
+		}
 		return xerrors.Errorf("failed to open db: %w", err)
 	}
 	return nil
